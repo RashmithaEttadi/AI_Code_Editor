@@ -1,3 +1,12 @@
+
+This project is a modified version of Judge0 (https://github.com/judge0). 
+It includes additional features such as 
+1. AI Chat functionality
+2. Inline Chat
+
+
+**Original Project**
+
 # Judge0 IDE
 [![Judge0 IDE Screenshot](./.github/screenshot.png)](https://ide.judge0.com)
 
