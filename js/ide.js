@@ -44,6 +44,7 @@ var timeEnd;
 
 var sqliteAdditionalFiles;
 var languages = {};
+let currentErrorDecorations = [];
 
 var layoutConfig = {
     settings: {
@@ -65,23 +66,34 @@ var layoutConfig = {
         }, {
             type: "column",
             content: [{
-                type: "component",
-                componentName: "stdin",
-                id: "stdin",
-                title: "Input",
-                isClosable: false,
-                componentState: {
-                    readOnly: false
-                }
+                type: "stack",
+                height: 50,  // Add height to make room for chat
+                content: [{
+                    type: "component",
+                    componentName: "stdin",
+                    id: "stdin",
+                    title: "Input",
+                    isClosable: false,
+                    componentState: {
+                        readOnly: false
+                    }
+                }, {
+                    type: "component",
+                    componentName: "stdout",
+                    id: "stdout",
+                    title: "Output",
+                    isClosable: false,
+                    componentState: {
+                        readOnly: true
+                    }
+                }]
             }, {
                 type: "component",
-                componentName: "stdout",
-                id: "stdout",
-                title: "Output",
-                isClosable: false,
-                componentState: {
-                    readOnly: true
-                }
+                height: 50,
+                componentName: "chat",
+                id: "chat",
+                title: "AI Chat",
+                isClosable: false
             }]
         }]
     }]
@@ -384,12 +396,36 @@ async function loadLangauges() {
     });
 };
 
+const suggestionsProvider = {
+    provideCompletionItems: (model, position) => {
+        const line = position.lineNumber;
+        const currentLanguage = model.getLanguageId();
+        
+        // Only show suggestions if there's an error in this line
+        if (!errorDecorations.some(d => d.range.startLineNumber === line)) return [];
+
+        return {
+            suggestions: [{
+                label: '🛠 Fix this error',
+                kind: monaco.languages.CompletionItemKind.QuickFix,
+                insertText: '',
+                command: {
+                    id: 'showErrorFix',
+                    title: `Show ${currentLanguage} Fix Suggestions`,
+                    arguments: [line]
+                }
+            }]
+        };
+    }
+};
+
 async function loadSelectedLanguage(skipSetDefaultSourceCodeName = false) {
     monaco.editor.setModelLanguage(sourceEditor.getModel(), $selectLanguage.find(":selected").attr("langauge_mode"));
 
     if (!skipSetDefaultSourceCodeName) {
         setSourceCodeName((await getSelectedLanguage()).source_file);
     }
+
 }
 
 function selectLanguageByFlavorAndId(languageId, flavor) {
@@ -459,6 +495,8 @@ function refreshLayoutSize() {
     layout.updateSize();
 }
 
+
+
 $(window).resize(refreshLayoutSize);
 
 $(document).ready(async function () {
@@ -503,40 +541,7 @@ $(document).ready(async function () {
 
     $statusLine = $("#judge0-status-line");
 
-    $(document).on("keydown", "body", function (e) {
-        if (e.metaKey || e.ctrlKey) {
-            switch (e.key) {
-                case "Enter": // Ctrl+Enter, Cmd+Enter
-                    e.preventDefault();
-                    run();
-                    break;
-                case "s": // Ctrl+S, Cmd+S
-                    e.preventDefault();
-                    save();
-                    break;
-                case "o": // Ctrl+O, Cmd+O
-                    e.preventDefault();
-                    open();
-                    break;
-                case "+": // Ctrl+Plus
-                case "=": // Some layouts use '=' for '+'
-                    e.preventDefault();
-                    fontSize += 1;
-                    setFontSizeForAllEditors(fontSize);
-                    break;
-                case "-": // Ctrl+Minus
-                    e.preventDefault();
-                    fontSize -= 1;
-                    setFontSizeForAllEditors(fontSize);
-                    break;
-                case "0": // Ctrl+0
-                    e.preventDefault();
-                    fontSize = 13;
-                    setFontSizeForAllEditors(fontSize);
-                    break;
-            }
-        }
-    });
+
 
     require(["vs/editor/editor.main"], function (ignorable) {
         layout = new GoldenLayout(layoutConfig, $("#judge0-site-content"));
@@ -582,6 +587,35 @@ $(document).ready(async function () {
             });
         });
 
+        layout.registerComponent("chat", function(container, state) {
+            const chatHtml = `
+                <div class="chat-container">
+                    <div class="model-selector">
+                        <select class="ui dropdown" id="llm-model-select">
+                            <option value="google/gemini-2.0-flash-thinking-exp:free" selected>Gemini 2.0 Flash</option>
+                            <option value="openai/o3-mini">OpenAI O3 Mini</option>
+                            <option value="qwen/qwen-turbo">Qwen Turbo</option>
+                            <option value="deepseek/deepseek-r1-distill-qwen-1.5b">DeepSeek R1 Distill</option>
+                            <option value="mistralai/mistral-small-24b-instruct-2501">Mistral Small 24B</option>
+                        </select>
+                        <div class="ui input">
+                            <input type="password" id="api-key-input" placeholder="Enter OpenRouter API Key">
+                        </div>
+                    </div>
+                    <div class="chat-messages" id="chat-messages"></div>
+                    <div class="chat-input">
+                        <div class="ui fluid action input">
+                            <input type="text" id="chat-input" placeholder="Ask about your code...">
+                            <button class="ui primary button" id="chat-send">Send</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            container.getElement().html(chatHtml);
+            initializeChat(container);
+        });
+
         layout.on("initialised", function () {
             setDefaults();
             refreshLayoutSize();
@@ -590,6 +624,327 @@ $(document).ready(async function () {
 
         layout.init();
     });
+
+
+
+sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
+    const selection = sourceEditor.getSelection();
+    if (!selection.isEmpty()) {
+        showInlineChat(selection);
+    }
+});
+
+// Track selection changes
+let lastSelection = null;
+sourceEditor.onDidChangeCursorSelection((e) => {
+    if (!e.selection.isEmpty()) {
+        lastSelection = e.selection;
+    }
+});
+    
+    function initializeChat(container) {
+        
+        const chatInput = container.getElement().find('#chat-input');
+        const chatMessages = container.getElement().find('#chat-messages');
+        const sendButton = container.getElement().find('#chat-send');
+        const apiKeyInput = container.getElement().find('#api-key-input');
+
+        let currentErrorDecorations = [];
+        
+        console.log("Chat elements found:", { // Debug log 2
+            chatInput: chatInput.length > 0,
+            chatMessages: chatMessages.length > 0,
+            sendButton: sendButton.length > 0,
+            apiKeyInput: apiKeyInput.length > 0
+        });
+        
+        function addMessage(content, isUser = false) {
+            try {
+                const messageDiv = $('<div>')
+                    .addClass('chat-message')
+                    .addClass(isUser ? 'user-message' : 'ai-message');
+        
+                const textDiv = $('<div>')
+                    .addClass('message-content');
+        
+                // Use marked for markdown formatting if available, otherwise plain text.
+                if (typeof marked !== 'undefined') {
+                    // Split the content into paragraphs for better readability
+                    const paragraphs = content.split('\n\n');
+                    paragraphs.forEach(paragraph => {
+                        if (paragraph.startsWith('```') && paragraph.endsWith('```')) {
+                            // Format as code block
+                            const codeContent = paragraph.replace(/```/g, '');
+                            textDiv.append(`<pre><code>${codeContent}</code></pre>`);
+                        } else if (paragraph.startsWith('- ') || paragraph.match(/^\d+\. /)) {
+                            // Format as list
+                            const listItems = paragraph.split('\n').map(item => `<li>${item.replace(/^-\s|^\d+\.\s/, '')}</li>`);
+                            textDiv.append(`<ul>${listItems.join('')}</ul>`);
+                        } else {
+                            // Format as regular paragraph
+                            textDiv.append(`<p>${marked.parse(paragraph)}</p>`);
+                        }
+                    });
+                } else {
+                    textDiv.text(content);
+                }
+        
+                messageDiv.append(textDiv);
+                chatMessages.append(messageDiv);
+        
+                if (window.hljs) {
+                    messageDiv.find('pre code').each(function(i, block) {
+                        hljs.highlightElement(block);
+                    });
+                }
+        
+                chatMessages.scrollTop(chatMessages[0].scrollHeight);
+            } catch (error) {
+                console.error('Error in addMessage:', error);
+                chatMessages.append($('<div>').text(content));
+            }
+        } 
+        
+        
+        async function sendMessage() {
+
+        
+            const message = chatInput.val().trim();
+           
+            if (!message) return;
+        
+            const apiKey = apiKeyInput.val().trim();
+            if (!apiKey) {
+                alert('Please enter your OpenRouter API key');
+                return;
+            }
+        
+            // Immediately add the user's message to the conversation.
+            addMessage(message, true);
+            chatInput.val(''); // Clear the input field.
+        
+            // Get code context
+            const codeContext = {
+                code: sourceEditor.getValue(),
+                language: $selectLanguage.find(":selected").text(),
+                input: stdinEditor.getValue(),
+                output: stdoutEditor.getValue(),
+                compilerOptions: $compilerOptions.val(),
+                commandLineArgs: $commandLineArguments.val()
+            };
+    // If there is an error printed in the output tab, include it in the prompt.
+    const errorOutput = codeContext.output;
+    let errorText = '';
+    if (errorOutput && errorOutput.trim().length > 0) {
+        errorText = `\n\nError Output from your program:\n\`\`\`\n${errorOutput}\n\`\`\``;
+    }
+
+    
+            try {
+                const selectedModel = container.getElement().find('#llm-model-select').val();
+                console.log("Using model:", selectedModel);
+        
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'HTTP-Referer': window.location.href,
+                        'X-Title': 'Code IDE Assistant',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: selectedModel,
+                        messages: [{
+                            role: 'user',
+                            content: [{
+                                type: 'text',
+                                text: `Analyze this code and answer the following question: ${message}\n\nCode in ${codeContext.language}:\n\n\`\`\`${codeContext.language}\n${codeContext.code}\n\`\`\``
+                            }]
+                        }]
+                    })
+                });
+        
+                const data = await response.json();
+        
+                if (data.error) {
+                    if (data.error.code === 429) {
+                        const fallbackResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${apiKey}`,
+                                'HTTP-Referer': window.location.href,
+                                'X-Title': 'Code IDE Assistant',
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                model: 'openai/gpt-3.5-turbo',
+                                messages: [{
+                                    role: 'user',
+                                    content: `Analyze this code and answer the following question: ${message}\n\nCode in ${codeContext.language}:\n\n\`\`\`${codeContext.language}\n${codeContext.code}\n\`\`\``
+                                }]
+                            })
+                        });
+        
+                        const fallbackData = await fallbackResponse.json();
+                        if (fallbackData.error) {
+                            throw new Error(fallbackData.error.message || 'Error with fallback model');
+                        }
+                        const fallbackResponseText = fallbackData.choices[0].message.content;
+                        addMessage(fallbackResponseText);
+                    } else {
+                        throw new Error(data.error.message || 'Unknown error occurred');
+                    }
+                } else {
+                    const responseText = data.choices[0].message.content;
+                    addMessage(responseText);
+                }
+            } catch (error) {
+                console.error("Error in sendMessage:", error);
+                chatMessages.children().last().remove();
+                addMessage(`Error: ${error.message}`);
+            }
+        }
+        
+        sendButton.off('click').on('click', () => {
+            console.log("Send button clicked");
+            sendMessage();
+        });
+        
+        chatInput.off('keypress').on('keypress', (e) => {
+            if (e.which === 13) {
+                console.log("Enter key pressed");
+                sendMessage();
+            }
+        });
+    }
+
+    let activeInlineChat = null;
+
+function showInlineChat(selection) {
+   
+    if (activeInlineChat) activeInlineChat.remove();
+
+    // Get selected text
+    const model = sourceEditor.getModel();
+    const selectedText = model.getValueInRange(selection);
+    
+    // Get editor coordinates
+    const startPos = selection.getStartPosition();
+    const editorNode = sourceEditor.getDomNode();
+    const { top, left } = sourceEditor.getScrolledVisiblePosition(startPos);
+    const editorRect = editorNode.getBoundingClientRect();
+
+    // Create chat container
+    const chatContainer = document.createElement('div');
+    chatContainer.className = 'inline-chat-wrapper';
+    chatContainer.style.top = `${editorRect.top + top + 24}px`;
+    chatContainer.style.left = `${editorRect.left + left}px`;
+    
+    // Build chat UI
+    chatContainer.innerHTML = `
+        <div class="inline-chat-header">
+            <span>Ask about selected code</span>
+            <button class="ui mini icon button close-btn">
+                <i class="close icon"></i>
+            </button>
+        </div>
+        <div class="inline-chat-body" id="inline-chat-messages"></div>
+        <div class="inline-chat-input">
+            <input type="text" class="ui input" id="inline-chat-input" 
+                   placeholder="Ask a question about this code...">
+            <button class="ui primary button" id="inline-chat-send">
+                <i class="paper plane icon"></i>
+            </button>
+        </div>
+    `;
+
+    document.body.appendChild(chatContainer);
+    activeInlineChat = chatContainer;
+
+    // Event listeners
+    const closeBtn = chatContainer.querySelector('.close-btn');
+    const sendBtn = chatContainer.querySelector('#inline-chat-send');
+    const inputField = chatContainer.querySelector('#inline-chat-input');
+
+    closeBtn.addEventListener('click', () => chatContainer.remove());
+    
+    sendBtn.addEventListener('click', async () => {
+        const question = inputField.value.trim();
+        if (!question) return;
+
+
+        // Disable input during processing
+        inputField.disabled = true;
+        sendBtn.classList.add('loading');
+
+        try {
+            const response = await processInlineQuery(selectedText, question);
+            appendInlineResponse(response);
+        } catch (error) {
+            appendInlineResponse(`Error: ${error.message}`);
+        } finally {
+            inputField.disabled = false;
+            sendBtn.classList.remove('loading');
+            inputField.value = '';
+        }
+    });
+
+    // Auto-focus input
+    inputField.focus();
+}
+
+
+async function processInlineQuery(code, question) {
+    const model = document.getElementById('llm-model-select').value;
+    const apiKey = document.getElementById('api-key-input').value;
+    
+    if (!apiKey) throw new Error('API key required');
+    
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: model,
+            messages: [{
+                role: "user",
+                content: `Analyze this code and answer the question. Focus your answer specifically on the selected code snippet.\n\n` +
+                         `Code snippet:\n\`\`\`\n${code}\n\`\`\`\n\nQuestion: ${question}`
+            }]
+        })
+    });
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+}
+
+function appendInlineResponse(text) {
+    const messagesDiv = activeInlineChat.querySelector('#inline-chat-messages');
+    if (!messagesDiv) {
+        console.error("Messages div not found!");
+        return;
+    }
+
+    const responseDiv = document.createElement('div');
+    responseDiv.className = 'chat-message ai-message';
+
+    // Use marked if available, otherwise use plain text
+    if (typeof marked !== 'undefined') {
+        responseDiv.innerHTML = marked.parse(text);
+    } else {
+        console.warn("marked.js not loaded - falling back to plain text");
+        responseDiv.textContent = text;
+    }
+
+    messagesDiv.appendChild(responseDiv);
+    
+    // Scroll to bottom
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+
 
     let superKey = "⌘";
     if (!/(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {

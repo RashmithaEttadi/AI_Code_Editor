@@ -13,6 +13,14 @@ html, body {
 #judge0-status-line, .lm_tab {
     font-family: "JetBrains Mono" !important;
 }
+#judge0-status-line {
+    position: fixed; /* Fix the position of the status line */
+    bottom: 0; /* Align it to the bottom */
+    right: 0;
+    background-color: rgba(0, 0, 0, 0.8); /* Background color */
+    color: white; /* Text color */
+    padding: 10px; /* Padding for better spacing */
+}
 
 #judge0-status-line:empty {
     display: none;
