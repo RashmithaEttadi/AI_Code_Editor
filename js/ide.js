@@ -348,6 +348,16 @@ function setFontSizeForAllEditors(fontSize) {
     stdoutEditor.updateOptions({ fontSize: fontSize });
 }
 
+function formatMarkdown(text) {
+    return text
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+        .replace(/`(.*?)`/g, '<code>$1</code>')
+        .replace(/- (.*)/g, '<li>$1</li>')
+        .replace(/\n/g, '<br>');
+}
+
 async function loadLangauges() {
     return new Promise((resolve, reject) => {
         let options = [];
@@ -665,29 +675,8 @@ sourceEditor.onDidChangeCursorSelection((e) => {
                     .addClass(isUser ? 'user-message' : 'ai-message');
         
                 const textDiv = $('<div>')
-                    .addClass('message-content');
-        
-                // Use marked for markdown formatting if available, otherwise plain text.
-                if (typeof marked !== 'undefined') {
-                    // Split the content into paragraphs for better readability
-                    const paragraphs = content.split('\n\n');
-                    paragraphs.forEach(paragraph => {
-                        if (paragraph.startsWith('```') && paragraph.endsWith('```')) {
-                            // Format as code block
-                            const codeContent = paragraph.replace(/```/g, '');
-                            textDiv.append(`<pre><code>${codeContent}</code></pre>`);
-                        } else if (paragraph.startsWith('- ') || paragraph.match(/^\d+\. /)) {
-                            // Format as list
-                            const listItems = paragraph.split('\n').map(item => `<li>${item.replace(/^-\s|^\d+\.\s/, '')}</li>`);
-                            textDiv.append(`<ul>${listItems.join('')}</ul>`);
-                        } else {
-                            // Format as regular paragraph
-                            textDiv.append(`<p>${marked.parse(paragraph)}</p>`);
-                        }
-                    });
-                } else {
-                    textDiv.text(content);
-                }
+                    .addClass('message-content')
+                    .html(formatMarkdown(content)); 
         
                 messageDiv.append(textDiv);
                 chatMessages.append(messageDiv);
@@ -722,6 +711,9 @@ sourceEditor.onDidChangeCursorSelection((e) => {
             // Immediately add the user's message to the conversation.
             addMessage(message, true);
             chatInput.val(''); // Clear the input field.
+
+            chatInput.prop('disabled', true);
+            sendButton.addClass('loading disabled');
         
             // Get code context
             const codeContext = {
@@ -732,12 +724,12 @@ sourceEditor.onDidChangeCursorSelection((e) => {
                 compilerOptions: $compilerOptions.val(),
                 commandLineArgs: $commandLineArguments.val()
             };
-    // If there is an error printed in the output tab, include it in the prompt.
-    const errorOutput = codeContext.output;
-    let errorText = '';
-    if (errorOutput && errorOutput.trim().length > 0) {
-        errorText = `\n\nError Output from your program:\n\`\`\`\n${errorOutput}\n\`\`\``;
-    }
+            // If there is an error printed in the output tab, include it in the prompt.
+            const errorOutput = codeContext.output;
+            let errorText = '';
+            if (errorOutput && errorOutput.trim().length > 0) {
+                errorText = `\n\nError Output from your program:\n\`\`\`\n${errorOutput}\n\`\`\``;
+                }
 
     
             try {
@@ -802,6 +794,11 @@ sourceEditor.onDidChangeCursorSelection((e) => {
                 console.error("Error in sendMessage:", error);
                 chatMessages.children().last().remove();
                 addMessage(`Error: ${error.message}`);
+            }
+            finally {
+                // Re-enable input
+                chatInput.prop('disabled', false);
+                sendButton.removeClass('loading disabled');
             }
         }
         
@@ -929,14 +926,7 @@ function appendInlineResponse(text) {
 
     const responseDiv = document.createElement('div');
     responseDiv.className = 'chat-message ai-message';
-
-    // Use marked if available, otherwise use plain text
-    if (typeof marked !== 'undefined') {
-        responseDiv.innerHTML = marked.parse(text);
-    } else {
-        console.warn("marked.js not loaded - falling back to plain text");
-        responseDiv.textContent = text;
-    }
+    responseDiv.innerHTML = formatMarkdown(text);
 
     messagesDiv.appendChild(responseDiv);
     
