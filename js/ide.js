@@ -67,7 +67,7 @@ var layoutConfig = {
             type: "column",
             content: [{
                 type: "stack",
-                height: 50,  // Add height to make room for chat
+                height: 50,
                 content: [{
                     type: "component",
                     componentName: "stdin",
@@ -93,6 +93,13 @@ var layoutConfig = {
                 componentName: "chat",
                 id: "chat",
                 title: "AI Chat",
+                isClosable: false
+            }, {
+                type: "component",
+                height: 30,
+                componentName: "bugFinder",
+                id: "bugFinder",
+                title: "Bug Finder",
                 isClosable: false
             }]
         }]
@@ -352,8 +359,7 @@ function formatMarkdown(text) {
     return text
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-        .replace(/`(.*?)`/g, '<code>$1</code>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>') // Only process inline code
         .replace(/- (.*)/g, '<li>$1</li>')
         .replace(/\n/g, '<br>');
 }
@@ -505,8 +511,6 @@ function refreshLayoutSize() {
     layout.updateSize();
 }
 
-
-
 $(window).resize(refreshLayoutSize);
 
 $(document).ready(async function () {
@@ -551,8 +555,6 @@ $(document).ready(async function () {
 
     $statusLine = $("#judge0-status-line");
 
-
-
     require(["vs/editor/editor.main"], function (ignorable) {
         layout = new GoldenLayout(layoutConfig, $("#judge0-site-content"));
 
@@ -569,6 +571,189 @@ $(document).ready(async function () {
             });
 
             sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
+
+            // Add intelligent code completion
+            sourceEditor.getModel().onDidChangeContent((event) => {
+                // Trigger suggestions automatically as user types
+                setTimeout(() => {
+                    sourceEditor.trigger('keyboard', 'editor.action.triggerSuggest', {});
+                }, 100);
+            });
+
+            // Register custom completion provider
+            monaco.languages.registerCompletionItemProvider('cpp', {
+                provideCompletionItems: function(model, position) {
+                    const word = model.getWordUntilPosition(position);
+                    const range = {
+                        startLineNumber: position.lineNumber,
+                        endLineNumber: position.lineNumber,
+                        startColumn: word.startColumn,
+                        endColumn: word.endColumn
+                    };
+
+                    // Custom suggestions based on context
+                    const suggestions = [
+                        {
+                            label: 'cout',
+                            kind: monaco.languages.CompletionItemKind.Snippet,
+                            insertText: 'std::cout << ${1:value} << std::endl;',
+                            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                            documentation: 'Output to console',
+                            range: range
+                        },
+                        {
+                            label: 'for',
+                            kind: monaco.languages.CompletionItemKind.Snippet,
+                            insertText: 'for (int ${1:i} = 0; ${1:i} < ${2:size}; ++${1:i}) {\n\t${3}\n}',
+                            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                            documentation: 'For loop',
+                            range: range
+                        }
+                        // Add more suggestions as needed
+                    ];
+
+                    return { suggestions: suggestions };
+                }
+            });
+
+            // Add bug finder feature
+            let currentDiagnostics = [];
+            let errorDecorations = [];
+
+            async function analyzeBugs() {
+                const code = sourceEditor.getValue();
+                const language = $selectLanguage.find(":selected").text();
+                const apiKey = document.getElementById('api-key-input').value;
+                
+                if (!apiKey) return;
+
+                try {
+                    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            model: document.getElementById('llm-model-select').value,
+                            messages: [{
+                                role: "user",
+                                content: `Analyze this ${language} code for potential bugs and issues. Return the results in this exact JSON format:
+                                {
+                                    "issues": [
+                                        {
+                                            "line": <line_number>,
+                                            "severity": "error|warning|info",
+                                            "message": "<description>",
+                                            "suggestion": "<fix_suggestion>"
+                                        }
+                                    ]
+                                }
+                                
+                                Code:
+                                ${code}`
+                            }]
+                        })
+                    });
+
+                    const data = await response.json();
+                    const analysis = JSON.parse(data.choices[0].message.content);
+                    
+                    // Clear previous decorations
+                    errorDecorations = sourceEditor.deltaDecorations(errorDecorations, []);
+                    
+                    // Create new decorations for issues
+                    const newDecorations = analysis.issues.map(issue => ({
+                        range: new monaco.Range(
+                            issue.line,
+                            1,
+                            issue.line,
+                            1
+                        ),
+                        options: {
+                            isWholeLine: true,
+                            className: `inlineDecoration ${issue.severity}`,
+                            glyphMarginClassName: `glyphMargin ${issue.severity}`,
+                            hoverMessage: { value: `${issue.message}\n\nSuggestion: ${issue.suggestion}` },
+                            glyphMarginHoverMessage: { value: `${issue.severity.toUpperCase()}: ${issue.message}` }
+                        }
+                    }));
+
+                    errorDecorations = sourceEditor.deltaDecorations([], newDecorations);
+                    
+                    // Register quick fix provider for these issues
+                    monaco.languages.registerCodeActionProvider(sourceEditor.getModel().getLanguageId(), {
+                        provideCodeActions: function(model, range, context, token) {
+                            const actions = [];
+                            const issue = analysis.issues.find(i => i.line === range.startLineNumber);
+                            
+                            if (issue) {
+                                actions.push({
+                                    title: `Fix: ${issue.suggestion}`,
+                                    kind: "quickfix",
+                                    isPreferred: true,
+                                    edit: {
+                                        edits: [{
+                                            resource: model.uri,
+                                            edit: {
+                                                range: new monaco.Range(issue.line, 1, issue.line, model.getLineMaxColumn(issue.line)),
+                                                text: issue.suggestion
+                                            }
+                                        }]
+                                    }
+                                });
+                            }
+                            
+                            return {
+                                actions: actions,
+                                dispose: () => {}
+                            };
+                        }
+                    });
+                } catch (error) {
+                    console.error('Error analyzing code:', error);
+                }
+            }
+
+            // Add CSS styles for error decorations
+            const style = document.createElement('style');
+            style.textContent = `
+            .inlineDecoration.error {
+                background: rgba(255, 0, 0, 0.1);
+                border-left: 3px solid red;
+            }
+            .inlineDecoration.warning {
+                background: rgba(255, 255, 0, 0.1);
+                border-left: 3px solid yellow;
+            }
+            .inlineDecoration.info {
+                background: rgba(0, 0, 255, 0.1);
+                border-left: 3px solid blue;
+            }
+            .glyphMargin {
+                width: 20px;
+                height: 20px;
+                margin-left: 5px;
+            }
+            .glyphMargin.error::before {
+                content: "⛔";
+            }
+            .glyphMargin.warning::before {
+                content: "⚠️";
+            }
+            .glyphMargin.info::before {
+                content: "ℹ️";
+            }
+            `;
+            document.head.appendChild(style);
+
+
+            // Trigger analysis on save or after typing pause
+            let analyzeTimeout;
+            sourceEditor.onDidChangeModelContent(() => {
+                clearTimeout(analyzeTimeout);
+                analyzeTimeout = setTimeout(analyzeBugs, 1000); // Analyze after 1 second of no typing
+            });
         });
 
         layout.registerComponent("stdin", function (container, state) {
@@ -607,6 +792,7 @@ $(document).ready(async function () {
                             <option value="qwen/qwen-turbo">Qwen Turbo</option>
                             <option value="deepseek/deepseek-r1-distill-qwen-1.5b">DeepSeek R1 Distill</option>
                             <option value="mistralai/mistral-small-24b-instruct-2501">Mistral Small 24B</option>
+                            <option value="meta-llama/llama-3-70b-instruct">Llama 3 70B Instruct</option>
                         </select>
                         <div class="ui input">
                             <input type="password" id="api-key-input" placeholder="Enter OpenRouter API Key">
@@ -626,6 +812,23 @@ $(document).ready(async function () {
             initializeChat(container);
         });
 
+        layout.registerComponent("bugFinder", function(container) {
+            const bugFinderHtml = `
+                <div class="bug-finder-container">
+                    <div class="bug-finder-header">
+                        <h3>Bug Finder</h3>
+                        <button class="ui primary button" id="scan-bugs-btn">
+                            <i class="bug icon"></i> Scan for Bugs
+                        </button>
+                    </div>
+                    <div class="bug-finder-results" id="bug-finder-results"></div>
+                </div>
+            `;
+            
+            container.getElement().html(bugFinderHtml);
+            initBugFinder(container);
+        });
+
         layout.on("initialised", function () {
             setDefaults();
             refreshLayoutSize();
@@ -635,71 +838,110 @@ $(document).ready(async function () {
         layout.init();
     });
 
+    sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
+        const selection = sourceEditor.getSelection();
+        if (!selection.isEmpty()) {
+            showInlineChat(selection);
+        }
+    });
 
-
-sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
-    const selection = sourceEditor.getSelection();
-    if (!selection.isEmpty()) {
-        showInlineChat(selection);
-    }
-});
-
-// Track selection changes
-let lastSelection = null;
-sourceEditor.onDidChangeCursorSelection((e) => {
-    if (!e.selection.isEmpty()) {
-        lastSelection = e.selection;
-    }
-});
+    // Track selection changes
+    let lastSelection = null;
+    sourceEditor.onDidChangeCursorSelection((e) => {
+        if (!e.selection.isEmpty()) {
+            lastSelection = e.selection;
+        }
+    });
     
     function initializeChat(container) {
-        
         const chatInput = container.getElement().find('#chat-input');
         const chatMessages = container.getElement().find('#chat-messages');
         const sendButton = container.getElement().find('#chat-send');
         const apiKeyInput = container.getElement().find('#api-key-input');
 
-        let currentErrorDecorations = [];
-        
-        console.log("Chat elements found:", { // Debug log 2
-            chatInput: chatInput.length > 0,
-            chatMessages: chatMessages.length > 0,
-            sendButton: sendButton.length > 0,
-            apiKeyInput: apiKeyInput.length > 0
-        });
-        
         function addMessage(content, isUser = false) {
-            try {
-                const messageDiv = $('<div>')
-                    .addClass('chat-message')
-                    .addClass(isUser ? 'user-message' : 'ai-message');
-        
-                const textDiv = $('<div>')
-                    .addClass('message-content')
-                    .html(formatMarkdown(content)); 
-        
-                messageDiv.append(textDiv);
-                chatMessages.append(messageDiv);
-        
-                if (window.hljs) {
-                    messageDiv.find('pre code').each(function(i, block) {
-                        hljs.highlightElement(block);
-                    });
-                }
-        
-                chatMessages.scrollTop(chatMessages[0].scrollHeight);
-            } catch (error) {
-                console.error('Error in addMessage:', error);
-                chatMessages.append($('<div>').text(content));
+            // First process all code blocks in the content
+            let processedContent = content;
+            if (!isUser) {
+                // Add unique IDs to each code block for reference
+                let codeBlockCount = 0;
+                processedContent = content.replace(/```([\s\S]*?)```/g, (match, code) => {
+                    const blockId = `code-block-${Date.now()}-${codeBlockCount++}`;
+                    return `<div class="code-block-wrapper" id="${blockId}">
+                                <div class="code-block-actions">
+                                    <button class="ui tiny button copy-code-btn">
+                                        <i class="copy icon"></i> Copy
+                                    </button>
+                                    <button class="ui tiny primary button apply-code-btn">
+                                        <i class="code icon"></i> Apply Changes
+                                    </button>
+                                </div>
+                                <pre><code>${code}</code></pre>
+                            </div>`;
+                });
             }
+
+            const messageDiv = $('<div>')
+                .addClass('chat-message')
+                .addClass(isUser ? 'user-message' : 'ai-message');
+
+            const textDiv = $('<div>')
+                .addClass('message-content')
+                .html(formatMarkdown(processedContent));
+
+            messageDiv.append(textDiv);
+            chatMessages.append(messageDiv);
+
+            // Add event handlers for the code block buttons
+            if (!isUser) {
+                messageDiv.find('.code-block-wrapper').each(function() {
+                    const wrapper = $(this);
+                    const codeBlock = wrapper.find('code');
+                    const codeContent = codeBlock.text();
+
+                    // Copy button handler
+                    wrapper.find('.copy-code-btn').click(function() {
+                        navigator.clipboard.writeText(codeContent);
+                        const $btn = $(this);
+                        $btn.html('<i class="check icon"></i> Copied!');
+                        setTimeout(() => $btn.html('<i class="copy icon"></i> Copy'), 2000);
+                    });
+
+                    // Apply changes button handler
+                    wrapper.find('.apply-code-btn').click(function() {
+                        // Look for line numbers in previous text
+                        let searchText = '';
+                        let element = wrapper[0];
+                        
+                        // Search backwards through DOM for line numbers
+                        while (element && !searchText.match(/line[s]?\s*:?\s*(\d+)(?:\s*-\s*(\d+))?/i)) {
+                            if (element.previousSibling) {
+                                element = element.previousSibling;
+                                if (element.textContent) {
+                                    searchText = element.textContent + ' ' + searchText;
+                                }
+                            } else if (element.parentElement) {
+                                element = element.parentElement.previousSibling;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let lineMatch = searchText.match(/line[s]?\s*:?\s*(\d+)(?:\s*-\s*(\d+))?/i);
+                        let startLine = lineMatch ? parseInt(lineMatch[1]) : null;
+                        let endLine = lineMatch && lineMatch[2] ? parseInt(lineMatch[2]) : startLine;
+
+                        showCodeDiffPreview(codeContent, startLine, endLine);
+                    });
+
+                });
+            }
+
+            chatMessages.scrollTop(chatMessages[0].scrollHeight);
         } 
         
-        
         async function sendMessage() {
-
-        
             const message = chatInput.val().trim();
-           
             if (!message) return;
         
             const apiKey = apiKeyInput.val().trim();
@@ -708,233 +950,172 @@ sourceEditor.onDidChangeCursorSelection((e) => {
                 return;
             }
         
-            // Immediately add the user's message to the conversation.
             addMessage(message, true);
-            chatInput.val(''); // Clear the input field.
-
+            chatInput.val('');
             chatInput.prop('disabled', true);
             sendButton.addClass('loading disabled');
         
-            // Get code context
-            const codeContext = {
-                code: sourceEditor.getValue(),
-                language: $selectLanguage.find(":selected").text(),
-                input: stdinEditor.getValue(),
-                output: stdoutEditor.getValue(),
-                compilerOptions: $compilerOptions.val(),
-                commandLineArgs: $commandLineArguments.val()
-            };
-            // If there is an error printed in the output tab, include it in the prompt.
-            const errorOutput = codeContext.output;
-            let errorText = '';
-            if (errorOutput && errorOutput.trim().length > 0) {
-                errorText = `\n\nError Output from your program:\n\`\`\`\n${errorOutput}\n\`\`\``;
-                }
-
-    
             try {
-                const selectedModel = container.getElement().find('#llm-model-select').val();
-                console.log("Using model:", selectedModel);
-        
                 const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${apiKey}`,
-                        'HTTP-Referer': window.location.href,
-                        'X-Title': 'Code IDE Assistant',
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        model: selectedModel,
+                        model: document.getElementById('llm-model-select').value,
                         messages: [{
-                            role: 'user',
-                            content: [{
-                                type: 'text',
-                                text: `Analyze this code and answer the following question: ${message}\n\nCode in ${codeContext.language}:\n\n\`\`\`${codeContext.language}\n${codeContext.code}\n\`\`\``
-                            }]
+                            role: "user",
+                            content: `Analyze this code and answer the following question: ${message}
+
+                            Code:
+                            \`\`\`${$selectLanguage.find(":selected").text()}
+                            ${sourceEditor.getValue()}
+                            \`\`\``
                         }]
                     })
                 });
-        
+
                 const data = await response.json();
-        
-                if (data.error) {
-                    if (data.error.code === 429) {
-                        const fallbackResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${apiKey}`,
-                                'HTTP-Referer': window.location.href,
-                                'X-Title': 'Code IDE Assistant',
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                model: 'openai/gpt-3.5-turbo',
-                                messages: [{
-                                    role: 'user',
-                                    content: `Analyze this code and answer the following question: ${message}\n\nCode in ${codeContext.language}:\n\n\`\`\`${codeContext.language}\n${codeContext.code}\n\`\`\``
-                                }]
-                            })
-                        });
-        
-                        const fallbackData = await fallbackResponse.json();
-                        if (fallbackData.error) {
-                            throw new Error(fallbackData.error.message || 'Error with fallback model');
-                        }
-                        const fallbackResponseText = fallbackData.choices[0].message.content;
-                        addMessage(fallbackResponseText);
-                    } else {
-                        throw new Error(data.error.message || 'Unknown error occurred');
-                    }
+                if (data.choices && data.choices[0]) {
+                    addMessage(data.choices[0].message.content);
                 } else {
-                    const responseText = data.choices[0].message.content;
-                    addMessage(responseText);
+                    throw new Error('Invalid response from API');
                 }
             } catch (error) {
-                console.error("Error in sendMessage:", error);
-                chatMessages.children().last().remove();
                 addMessage(`Error: ${error.message}`);
-            }
-            finally {
-                // Re-enable input
+            } finally {
                 chatInput.prop('disabled', false);
                 sendButton.removeClass('loading disabled');
             }
         }
         
-        sendButton.off('click').on('click', () => {
-            console.log("Send button clicked");
-            sendMessage();
+        sendButton.on('click', sendMessage);
+        chatInput.on('keypress', (e) => {
+            if (e.which === 13) sendMessage();
         });
-        
-        chatInput.off('keypress').on('keypress', (e) => {
-            if (e.which === 13) {
-                console.log("Enter key pressed");
-                sendMessage();
-            }
-        });
+
+        // Set default code in source editor
+        if (sourceEditor.getValue().trim() === '') {
+            sourceEditor.setValue(DEFAULT_SOURCE);
+        }
     }
 
     let activeInlineChat = null;
 
-function showInlineChat(selection) {
-   
-    if (activeInlineChat) activeInlineChat.remove();
+    function showInlineChat(selection) {
+        if (activeInlineChat) activeInlineChat.remove();
 
-    // Get selected text
-    const model = sourceEditor.getModel();
-    const selectedText = model.getValueInRange(selection);
-    
-    // Get editor coordinates
-    const startPos = selection.getStartPosition();
-    const editorNode = sourceEditor.getDomNode();
-    const { top, left } = sourceEditor.getScrolledVisiblePosition(startPos);
-    const editorRect = editorNode.getBoundingClientRect();
+        // Get selected text
+        const model = sourceEditor.getModel();
+        const selectedText = model.getValueInRange(selection);
+        
+        // Get editor coordinates
+        const startPos = selection.getStartPosition();
+        const editorNode = sourceEditor.getDomNode();
+        const { top, left } = sourceEditor.getScrolledVisiblePosition(startPos);
+        const editorRect = editorNode.getBoundingClientRect();
 
-    // Create chat container
-    const chatContainer = document.createElement('div');
-    chatContainer.className = 'inline-chat-wrapper';
-    chatContainer.style.top = `${editorRect.top + top + 24}px`;
-    chatContainer.style.left = `${editorRect.left + left}px`;
-    
-    // Build chat UI
-    chatContainer.innerHTML = `
-        <div class="inline-chat-header">
-            <span>Ask about selected code</span>
-            <button class="ui mini icon button close-btn">
-                <i class="close icon"></i>
-            </button>
-        </div>
-        <div class="inline-chat-body" id="inline-chat-messages"></div>
-        <div class="inline-chat-input">
-            <input type="text" class="ui input" id="inline-chat-input" 
-                   placeholder="Ask a question about this code...">
-            <button class="ui primary button" id="inline-chat-send">
-                <i class="paper plane icon"></i>
-            </button>
-        </div>
-    `;
+        // Create chat container
+        const chatContainer = document.createElement('div');
+        chatContainer.className = 'inline-chat-wrapper';
+        chatContainer.style.top = `${editorRect.top + top + 24}px`;
+        chatContainer.style.left = `${editorRect.left + left}px`;
+        
+        // Build chat UI
+        chatContainer.innerHTML = `
+            <div class="inline-chat-header">
+                <span>Ask about selected code</span>
+                <button class="ui mini icon button close-btn">
+                    <i class="close icon"></i>
+                </button>
+            </div>
+            <div class="inline-chat-body" id="inline-chat-messages"></div>
+            <div class="inline-chat-input">
+                <input type="text" class="ui input" id="inline-chat-input" 
+                       placeholder="Ask a question about this code...">
+                <button class="ui primary button" id="inline-chat-send">
+                    <i class="paper plane icon"></i>
+                </button>
+            </div>
+        `;
 
-    document.body.appendChild(chatContainer);
-    activeInlineChat = chatContainer;
+        document.body.appendChild(chatContainer);
+        activeInlineChat = chatContainer;
 
-    // Event listeners
-    const closeBtn = chatContainer.querySelector('.close-btn');
-    const sendBtn = chatContainer.querySelector('#inline-chat-send');
-    const inputField = chatContainer.querySelector('#inline-chat-input');
+        // Event listeners
+        const closeBtn = chatContainer.querySelector('.close-btn');
+        const sendBtn = chatContainer.querySelector('#inline-chat-send');
+        const inputField = chatContainer.querySelector('#inline-chat-input');
 
-    closeBtn.addEventListener('click', () => chatContainer.remove());
-    
-    sendBtn.addEventListener('click', async () => {
-        const question = inputField.value.trim();
-        if (!question) return;
+        closeBtn.addEventListener('click', () => chatContainer.remove());
+        
+        sendBtn.addEventListener('click', async () => {
+            const question = inputField.value.trim();
+            if (!question) return;
 
+            // Disable input during processing
+            inputField.disabled = true;
+            sendBtn.classList.add('loading');
 
-        // Disable input during processing
-        inputField.disabled = true;
-        sendBtn.classList.add('loading');
+            try {
+                const response = await processInlineQuery(selectedText, question);
+                appendInlineResponse(response);
+            } catch (error) {
+                appendInlineResponse(`Error: ${error.message}`);
+            } finally {
+                inputField.disabled = false;
+                sendBtn.classList.remove('loading');
+                inputField.value = '';
+            }
+        });
 
-        try {
-            const response = await processInlineQuery(selectedText, question);
-            appendInlineResponse(response);
-        } catch (error) {
-            appendInlineResponse(`Error: ${error.message}`);
-        } finally {
-            inputField.disabled = false;
-            sendBtn.classList.remove('loading');
-            inputField.value = '';
-        }
-    });
-
-    // Auto-focus input
-    inputField.focus();
-}
-
-
-async function processInlineQuery(code, question) {
-    const model = document.getElementById('llm-model-select').value;
-    const apiKey = document.getElementById('api-key-input').value;
-    
-    if (!apiKey) throw new Error('API key required');
-    
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            model: model,
-            messages: [{
-                role: "user",
-                content: `Analyze this code and answer the question. Focus your answer specifically on the selected code snippet.\n\n` +
-                         `Code snippet:\n\`\`\`\n${code}\n\`\`\`\n\nQuestion: ${question}`
-            }]
-        })
-    });
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-}
-
-function appendInlineResponse(text) {
-    const messagesDiv = activeInlineChat.querySelector('#inline-chat-messages');
-    if (!messagesDiv) {
-        console.error("Messages div not found!");
-        return;
+        // Auto-focus input
+        inputField.focus();
     }
 
-    const responseDiv = document.createElement('div');
-    responseDiv.className = 'chat-message ai-message';
-    responseDiv.innerHTML = formatMarkdown(text);
+    async function processInlineQuery(code, question) {
+        const model = document.getElementById('llm-model-select').value;
+        const apiKey = document.getElementById('api-key-input').value;
+        
+        if (!apiKey) throw new Error('API key required');
+        
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: model,
+                messages: [{
+                    role: "user",
+                    content: `Analyze this code and answer the question. Focus your answer specifically on the selected code snippet.\n\n` +
+                             `Code snippet:\n\`\`\`\n${code}\n\`\`\`\n\nQuestion: ${question}`
+                }]
+            })
+        });
 
-    messagesDiv.appendChild(responseDiv);
-    
-    // Scroll to bottom
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-}
+        const data = await response.json();
+        return data.choices[0].message.content;
+    }
 
+    function appendInlineResponse(text) {
+        const messagesDiv = activeInlineChat.querySelector('#inline-chat-messages');
+        if (!messagesDiv) {
+            console.error("Messages div not found!");
+            return;
+        }
 
+        const responseDiv = document.createElement('div');
+        responseDiv.className = 'chat-message ai-message';
+        responseDiv.innerHTML = formatMarkdown(text);
+
+        messagesDiv.appendChild(responseDiv);
+        
+        // Scroll to bottom
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
 
     let superKey = "⌘";
     if (!/(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
@@ -997,6 +1178,517 @@ function appendInlineResponse(text) {
             }
         }
     };
+
+    // Add the bug finder functionality
+    function initBugFinder(container) {
+        const resultsDiv = container.getElement().find('#bug-finder-results');
+        const scanButton = container.getElement().find('#scan-bugs-btn');
+        
+        async function scanForBugs() {
+            const code = sourceEditor.getValue();
+            const language = $selectLanguage.find(":selected").text();
+            const apiKey = document.getElementById('api-key-input').value;
+            
+            if (!apiKey) {
+                alert('Please enter your OpenRouter API key');
+                return;
+            }
+            
+            scanButton.addClass('loading');
+            resultsDiv.html('<div class="ui active loader"></div>');
+            
+            try {
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: document.getElementById('llm-model-select').value,
+                        messages: [{
+                            role: "user",
+                            content: `You are a code analyzer. Analyze this ${language} code for potential bugs, errors, and improvements. Format your response exactly like this example:
+
+                            Issue 1:
+                            Line: <line_number>
+                            Type: <bug|error|improvement>
+                            Description: <describe the issue>
+                            Fix:
+                            \`\`\`
+                            <corrected code for this line>
+                            \`\`\`
+
+                            Issue 2:
+                            ...
+
+                            Code to analyze:
+                            \`\`\`${language}
+                            ${code}
+                            \`\`\``
+                        }]
+                    })
+                });
+
+                const data = await response.json();
+                if (!data.choices || !data.choices[0]) {
+                    throw new Error('Invalid response from API');
+                }
+                
+                const analysis = data.choices[0].message.content;
+                displayBugResults(analysis, resultsDiv);
+                
+            } catch (error) {
+                resultsDiv.html(`<div class="ui negative message">Error: ${error.message}</div>`);
+            } finally {
+                scanButton.removeClass('loading');
+            }
+        }
+        
+        function displayBugResults(analysis, resultsDiv) {
+            const issues = analysis.split(/Issue \d+:/g).filter(Boolean);
+            
+            if (issues.length === 0) {
+                resultsDiv.html('<div class="ui info message">No issues found in the code.</div>');
+                return;
+            }
+
+            const resultsHtml = issues.map(issue => {
+                const lineMatch = issue.match(/Line:\s*(\d+)/);
+                const typeMatch = issue.match(/Type:\s*(\w+)/);
+                const descMatch = issue.match(/Description:\s*([^\n]+)/);
+                const codeMatch = issue.match(/```(?:\w+)?\n([\s\S]*?)```/);
+
+                if (!lineMatch || !typeMatch || !descMatch) return '';
+
+                const lineNum = lineMatch[1];
+                const type = typeMatch[1];
+                const description = descMatch[1];
+                const fixCode = codeMatch ? codeMatch[1].trim() : '';
+
+                return `
+                    <div class="bug-item">
+                        <div class="bug-header">
+                            <span class="bug-line">Line ${lineNum}</span>
+                            <span class="bug-type ${type.toLowerCase()}">${type}</span>
+                        </div>
+                        <div class="bug-description">${description}</div>
+                        ${fixCode ? `
+                            <div class="bug-fix">
+                                <pre><code>${fixCode}</code></pre>
+                                <button class="ui tiny primary button apply-fix-btn" 
+                                        data-line="${lineNum}" 
+                                        data-fix="${escapeHtml(fixCode)}">
+                                    Apply Fix
+                                </button>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            resultsDiv.html(`
+                <div class="bug-results">
+                    ${resultsHtml}
+                </div>
+            `);
+
+            // Add click handlers for apply buttons
+            resultsDiv.find('.apply-fix-btn').on('click', function() {
+                const fixCode = $(this).data('fix');
+                const lineNumber = $(this).data('line');
+                applyCodeFix(fixCode, lineNumber);
+            });
+        }
+        
+        function escapeHtml(str) {
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        function applyCodeFix(fixCode, lineNumber) {
+            const model = sourceEditor.getModel();
+            const lineContent = model.getLineContent(parseInt(lineNumber));
+            
+            // Show diff preview before applying
+            showCodeDiffPreview(lineContent, fixCode, parseInt(lineNumber));
+        }
+        
+        scanButton.on('click', scanForBugs);
+    }
+
+    // Add this after sourceEditor creation
+    let suggestionWidget = null;
+    let currentSuggestions = [];
+
+    // Add AI-powered code completion
+    sourceEditor.getModel().onDidChangeContent((event) => {
+        if (event.changes[0].text.length === 1) {
+            checkForCompletions();
+        }
+    });
+
+    function parseSuggestions(content) {
+        const suggestions = [];
+        const matches = content.matchAll(/```(?:\w+)?\n([\s\S]*?)```\n*(.*?)(?=```|$)/gs);
+        
+        for (const match of matches) {
+            suggestions.push({
+                code: match[1].trim(),
+                explanation: match[2].trim()
+            });
+        }
+        
+        return suggestions;
+    }
+
+    async function checkForCompletions() {
+        const model = sourceEditor.getModel();
+        const position = sourceEditor.getPosition();
+        const currentLine = model.getLineContent(position.lineNumber);
+        const apiKey = document.getElementById('api-key-input').value;
+        
+        if (!apiKey || !currentLine.trim()) return;
+        
+        try {
+            const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: document.getElementById('llm-model-select').value,
+                    messages: [{
+                        role: "user",
+                        content: `You are a code completion assistant. Based on this line of code, suggest 2-3 possible completions. Format each suggestion as a code block followed by a brief explanation.
+
+                        Current line: ${currentLine}
+                        Language: ${model.getLanguageId()}
+
+                        Example format:
+                        \`\`\`
+                        suggested code
+                        \`\`\`
+                        Brief explanation of what this code does
+
+                        \`\`\`
+                        another suggestion
+                        \`\`\`
+                        Explanation for this suggestion`
+                    }]
+                })
+            });
+
+            const data = await response.json();
+            if (!data.choices || !data.choices[0]) {
+                throw new Error('Invalid response from API');
+            }
+
+            const suggestions = parseSuggestions(data.choices[0].message.content);
+            if (suggestions.length > 0) {
+                showSuggestions(suggestions, position);
+            }
+            
+        } catch (error) {
+            console.error('Completion error:', error);
+        }
+    }
+
+    function showSuggestions(suggestions, position) {
+        if (suggestionWidget) {
+            suggestionWidget.dispose();
+        }
+        
+        const widgetHtml = `
+            <div class="ai-suggestions-widget">
+                ${suggestions.map((suggestion, index) => `
+                    <div class="suggestion-item">
+                        <pre><code>${suggestion.code}</code></pre>
+                        <p>${suggestion.explanation}</p>
+                        <button class="ui tiny primary button apply-suggestion-btn" data-index="${index}">
+                            Apply
+                        </button>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+        
+        const domNode = document.createElement('div');
+        domNode.innerHTML = widgetHtml;
+        
+        domNode.querySelectorAll('.apply-suggestion-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const index = parseInt(e.target.dataset.index);
+                applySuggestion(suggestions[index].code);
+                suggestionWidget.dispose();
+            });
+        });
+        
+        suggestionWidget = sourceEditor.createContentWidget({
+            getId: () => 'ai-suggestions-widget',
+            getDomNode: () => domNode,
+            getPosition: () => ({
+                position: position,
+                preference: [monaco.editor.ContentWidgetPositionPreference.BELOW]
+            })
+        });
+    }
+
+    function applySuggestion(newCode) {
+        const position = sourceEditor.getPosition();
+        const model = sourceEditor.getModel();
+        const lineContent = model.getLineContent(position.lineNumber);
+        
+        // Get original and new code as arrays
+        const originalLines = lineContent.split('\n');
+        const newLines = newCode.trim().split('\n');
+        
+        // Compute diff using Monaco's diff algorithm
+        const diffComputer = new monaco.services.DiffComputer(originalLines, newLines, {
+            shouldComputeCharChanges: true,
+            shouldPostProcessCharChanges: true,
+            shouldIgnoreTrimWhitespace: false,
+            maxComputationTime: 1000
+        });
+        
+        const lineChanges = diffComputer.computeDiff().changes;
+        
+        // Create edit operations from the diff
+        const edits = lineChanges.map(change => ({
+            range: new monaco.Range(
+                position.lineNumber + change.originalStart,
+                1,
+                position.lineNumber + change.originalStart + change.originalLength,
+                model.getLineMaxColumn(position.lineNumber + change.originalStart + change.originalLength - 1)
+            ),
+            text: newLines.slice(change.modifiedStart, change.modifiedStart + change.modifiedLength).join('\n')
+        }));
+        
+        // Apply the edits
+        sourceEditor.executeEdits('suggestion', edits);
+        
+        // Show the changes in a diff view
+        showCodeDiffPreview(lineContent, newCode.trim());
+    }
+
+    // Update the showCodeDiffPreview function to properly handle code blocks
+    function showCodeDiffPreview(newCode, startLine, endLine) {
+        const editor = sourceEditor;
+        const model = editor.getModel();
+        const originalCode = model.getValue();
+        const lines = originalCode.split('\n');
+        
+        // Normalize line endings and preserve formatting
+        newCode = newCode.trim()
+            .replace(/\r\n/g, '\n')
+            .replace(/\\n/g, '\n')  // Handle escaped newlines
+            .replace(/\n\s*\n/g, '\n\n'); // Normalize multiple newlines
+        
+        // Try to detect if this is a full file replacement or a specific block
+        const isFullFile = newCode.includes('class') || 
+                          newCode.includes('function') || 
+                          newCode.includes('#include') ||
+                          newCode.split('\n').length > 20;
+
+        // If no line numbers were found, try to detect the location based on code similarity
+        if (!startLine && !isFullFile) {
+            const newLines = newCode.split('\n');
+            let bestMatch = {
+                line: 0,
+                score: 0
+            };
+
+            // Look for the most similar line in the file
+            for (let i = 0; i < lines.length; i++) {
+                const similarity = calculateSimilarity(lines[i], newLines[0]);
+                if (similarity > bestMatch.score) {
+                    bestMatch.line = i + 1;
+                    bestMatch.score = similarity;
+                }
+            }
+
+            if (bestMatch.score > 0.5) {
+                startLine = bestMatch.line;
+                endLine = startLine + newLines.length - 1;
+            }
+        }
+
+        // Prepare the replacement code and range
+        let replacementRange;
+        let originalForDiff;
+        let modifiedForDiff;
+
+        if (startLine && !isFullFile) {
+            // For specific line(s) replacement
+            endLine = endLine || startLine;
+            replacementRange = new monaco.Range(
+                startLine,
+                1,
+                endLine,
+                lines[endLine - 1].length + 1
+            );
+
+            // Get the original block of code
+            originalForDiff = lines.slice(startLine - 1, endLine).join('\n');
+            
+            // Ensure proper line endings in the new code
+            modifiedForDiff = newCode.split('\n')
+                .map(line => line.trimRight())  // Remove trailing spaces
+                .join('\n');
+        } else {
+            // For full file replacement
+            replacementRange = model.getFullModelRange();
+            originalForDiff = originalCode;
+            modifiedForDiff = newCode.split('\n')
+                .map(line => line.trimRight())
+                .join('\n');
+        }
+
+        // Create diff editor container
+        const diffContainer = document.createElement('div');
+        diffContainer.className = 'diff-preview-container';
+        diffContainer.style.height = '400px';
+        
+        // Create diff editor with proper formatting options
+        const diffEditor = monaco.editor.createDiffEditor(diffContainer, {
+            readOnly: true,
+            renderSideBySide: true,
+            minimap: { enabled: false },
+            fontSize: fontSize,
+            theme: 'vs-dark',
+            automaticLayout: true,
+            renderWhitespace: 'all',
+            scrollBeyondLastLine: false,
+            formatOnPaste: true,
+            formatOnType: true
+        });
+        
+        // Create models for diff editor with proper language detection
+        const language = model.getLanguageId();
+        const originalModel = monaco.editor.createModel(originalForDiff, language);
+        const modifiedModel = monaco.editor.createModel(modifiedForDiff, language);
+        
+        // Format the code in both models
+        setTimeout(() => {
+            monaco.editor.getModelMarkers({}).forEach(marker => {
+                if (marker.severity === monaco.MarkerSeverity.Error) {
+                    console.log('Format error:', marker);
+                }
+            });
+        }, 100);
+
+        diffEditor.setModel({
+            original: originalModel,
+            modified: modifiedModel
+        });
+        
+        // Create modal for diff preview
+        const modal = document.createElement('div');
+        modal.className = 'ui modal diff-preview-modal';
+        modal.innerHTML = `
+            <div class="header">
+                <i class="exchange icon"></i> Preview Changes
+                ${startLine && !isFullFile ? 
+                    `<span class="line-info">(Lines ${startLine}${endLine > startLine ? `-${endLine}` : ''})</span>` : 
+                    '<span class="line-info">(Full File)</span>'}
+            </div>
+            <div class="content"></div>
+            <div class="actions">
+                <div class="ui cancel button">Cancel</div>
+                <div class="ui approve primary button">
+                    <i class="check icon"></i> Apply Changes
+                </div>
+            </div>
+        `;
+        
+        modal.querySelector('.content').appendChild(diffContainer);
+        document.body.appendChild(modal);
+        
+        // Show modal with diff
+        $(modal).modal({
+            onShow: function() {
+                setTimeout(() => {
+                    diffEditor.layout();
+                    // Try to format the code after layout
+                    try {
+                        monaco.editor.getAction('editor.action.formatDocument').run();
+                    } catch (e) {
+                        console.log('Format error:', e);
+                    }
+                }, 100);
+            },
+            onApprove: function() {
+                try {
+                    // Apply the changes with proper formatting
+                    editor.executeEdits('ai-changes', [{
+                        range: replacementRange,
+                        text: modifiedForDiff
+                    }]);
+                    
+                    // Add temporary highlight
+                    const decoration = [{
+                        range: replacementRange,
+                        options: {
+                            className: 'line-modify',
+                            isWholeLine: true
+                        }
+                    }];
+                    
+                    const decorationIds = editor.deltaDecorations([], decoration);
+                    
+                    // Remove highlight after animation
+                    setTimeout(() => {
+                        editor.deltaDecorations(decorationIds, []);
+                    }, 3000);
+                    
+                    // Format the document
+                    setTimeout(() => {
+                        editor.getAction('editor.action.formatDocument').run();
+                    }, 100);
+                    
+                } catch (error) {
+                    console.error('Error applying changes:', error);
+                    alert('Error applying changes. Please try again.');
+                }
+                
+                originalModel.dispose();
+                modifiedModel.dispose();
+            },
+            onHidden: function() {
+                originalModel.dispose();
+                modifiedModel.dispose();
+                modal.remove();
+            }
+        }).modal('show');
+    }
+
+    // Helper function to calculate similarity between two strings
+    function calculateSimilarity(str1, str2) {
+        const len1 = str1.length;
+        const len2 = str2.length;
+        const matrix = Array(len1 + 1).fill().map(() => Array(len2 + 1).fill(0));
+
+        for (let i = 0; i <= len1; i++) matrix[i][0] = i;
+        for (let j = 0; j <= len2; j++) matrix[0][j] = j;
+
+        for (let i = 1; i <= len1; i++) {
+            for (let j = 1; j <= len2; j++) {
+                const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+                matrix[i][j] = Math.min(
+                    matrix[i - 1][j] + 1,
+                    matrix[i][j - 1] + 1,
+                    matrix[i - 1][j - 1] + cost
+                );
+            }
+        }
+
+        return 1 - (matrix[len1][len2] / Math.max(len1, len2));
+    }
 });
 
 const DEFAULT_SOURCE = "\

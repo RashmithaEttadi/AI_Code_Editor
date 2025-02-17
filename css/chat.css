@@ -115,3 +115,115 @@
     margin-left: 20px;
     list-style-type: disc;
 }
+
+/* code block action styles */
+.code-block-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 8px;
+    background: #2d2d2d;
+    border-radius: 4px 4px 0 0;
+    margin-top: 10px;
+}
+
+.copy-code-btn, .apply-code-btn {
+    font-size: 12px !important;
+    padding: 6px 12px !important;
+    margin: 0 !important;
+}
+
+.message-content pre {
+    margin-top: 0 !important;
+    border-radius: 0 0 4px 4px !important;
+    background: #1e1e1e !important;
+}
+
+.message-content pre code {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 13px !important;
+    padding: 16px !important;
+}
+
+/* diff preview styles */
+.diff-preview-modal {
+    width: 90% !important;
+    height: 80% !important;
+    background: #1e1e1e !important;
+}
+
+.diff-preview-modal .header {
+    background: #2d2d2d !important;
+    color: #fff !important;
+    border-bottom: 1px solid #454545 !important;
+    padding: 15px !important;
+}
+
+.diff-preview-modal .content {
+    height: calc(100% - 110px) !important;
+    padding: 0 !important;
+    background: #1e1e1e !important;
+}
+
+.diff-preview-container {
+    height: 100% !important;
+    border: 1px solid #454545;
+}
+
+.diff-preview-modal .actions {
+    background: #2d2d2d !important;
+    border-top: 1px solid #454545 !important;
+    padding: 15px !important;
+}
+
+.diff-preview-modal .button {
+    margin-left: 10px !important;
+}
+
+.diff-preview-modal .header .line-info {
+    margin-left: 10px;
+    font-size: 0.9em;
+    color: #888;
+}
+
+/* Animation for changed lines */
+.line-modify {
+    animation: highlightLine 3s ease-out;
+}
+
+@keyframes highlightLine {
+    0% { background-color: rgba(0, 122, 204, 0.2); }
+    100% { background-color: transparent; }
+}
+
+.line-modification-gutter {
+    width: 5px !important;
+    background-color: #007acc;
+}
+
+/* code block handling */
+.code-block-wrapper {
+    margin: 10px 0;
+    background: #1e1e1e;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.code-block-wrapper pre {
+    margin: 0 !important;
+    padding: 16px !important;
+    background: transparent !important;
+}
+
+.code-block-wrapper .code-block-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 8px;
+    background: #2d2d2d;
+    border-bottom: 1px solid #454545;
+}
+
+.code-block-wrapper .code-block-actions button {
+    margin: 0 !important;
+}
